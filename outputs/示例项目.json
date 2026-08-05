@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "growth",
+      "name": "增长项目",
+      "projects": [
+        {
+          "id": "launch-campaign",
+          "name": "新品发布",
+          "progress": "等待设计稿终版",
+          "owner": "小王",
+          "lastFollowedAt": null,
+          "isArchived": false
+        },
+        {
+          "id": "channel-review",
+          "name": "渠道复盘",
+          "progress": "待确认下周会议时间",
+          "owner": "小陈",
+          "lastFollowedAt": null,
+          "isArchived": false
+        }
+      ]
+    },
+    {
+      "id": "product",
+      "name": "产品迭代",
+      "projects": [
+        {
+          "id": "search-improvement",
+          "name": "搜索优化",
+          "progress": "等待灰度数据",
+          "owner": "小李",
+          "lastFollowedAt": null,
+          "isArchived": false
+        }
+      ]
+    }
+  ]
+}
