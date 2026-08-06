@@ -77,9 +77,12 @@ final class ClosureButton: NSButton {
     @objc private func runHandler() { handler?() }
 }
 
-final class ProjectDragHandle: NSView {
-    var onReorder: ((Int) -> Void)?
-    private var isTrackingDrag = false
+private let projectDragType = NSPasteboard.PasteboardType("local.followupbell.project-row")
+
+final class ProjectDragHandle: NSView, NSDraggingSource {
+    var payload = ""
+    weak var previewView: NSView?
+    private var isDragging = false
 
     override var intrinsicContentSize: NSSize { NSSize(width: 22, height: 28) }
     override var mouseDownCanMoveWindow: Bool { false }
@@ -93,18 +96,88 @@ final class ProjectDragHandle: NSView {
         ])
     }
 
-    override func mouseDown(with event: NSEvent) {
-        guard !isTrackingDrag, let window else { return }
-        isTrackingDrag = true
-        let startY = event.locationInWindow.y
-        var lastY = startY
-        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture, inMode: .eventTracking, dequeue: true) {
-            lastY = next.locationInWindow.y
-            if next.type == .leftMouseUp { break }
-        }
-        isTrackingDrag = false
-        let rowOffset = Int(round((startY - lastY) / 46.0))
-        if rowOffset != 0 { onReorder?(rowOffset) }
+    override func mouseDragged(with event: NSEvent) {
+        guard !isDragging, !payload.isEmpty else { return }
+        isDragging = true
+        let itemData = NSPasteboardItem()
+        itemData.setString(payload, forType: projectDragType)
+        let item = NSDraggingItem(pasteboardWriter: itemData)
+        let preview = ghostImage()
+        let size = preview.size
+        item.setDraggingFrame(NSRect(x: -18, y: bounds.midY - size.height / 2, width: size.width, height: size.height), contents: preview)
+        let session = beginDraggingSession(with: [item], event: event, source: self)
+        session.draggingFormation = .none
+        session.animatesToStartingPositionsOnCancelOrFail = true
+    }
+
+    private func ghostImage() -> NSImage {
+        guard let view = previewView,
+              let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return NSImage(size: NSSize(width: 320, height: 36)) }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        let source = NSImage(size: view.bounds.size)
+        source.addRepresentation(bitmap)
+        let ghost = NSImage(size: view.bounds.size)
+        ghost.lockFocus()
+        source.draw(in: NSRect(origin: .zero, size: view.bounds.size), from: .zero, operation: .sourceOver, fraction: 0.68)
+        ghost.unlockFocus()
+        return ghost
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .move }
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool { true }
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) { isDragging = false }
+}
+
+final class ProjectDropRow: NSStackView {
+    var onProjectDrop: ((Int, Int, Bool) -> Void)?
+    private let insertionLine = CALayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([projectDragType])
+        wantsLayer = true
+        insertionLine.backgroundColor = NSColor.controlAccentColor.cgColor
+        insertionLine.cornerRadius = 1.5
+        insertionLine.isHidden = true
+        layer?.addSublayer(insertionLine)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        insertionLine.frame.size.width = bounds.width - 22
+        insertionLine.frame.size.height = 3
+        insertionLine.frame.origin.x = 18
+    }
+
+    private func updateInsertionLine(_ sender: NSDraggingInfo) -> Bool {
+        let point = convert(sender.draggingLocation, from: nil)
+        let insertAfter = point.y < bounds.midY
+        insertionLine.frame.origin.y = insertAfter ? 1 : bounds.height - 4
+        insertionLine.isHidden = false
+        return insertAfter
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        _ = updateInsertionLine(sender)
+        return .move
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        _ = updateInsertionLine(sender)
+        return .move
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) { insertionLine.isHidden = true }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        defer { insertionLine.isHidden = true }
+        guard let raw = sender.draggingPasteboard.string(forType: projectDragType) else { return false }
+        let parts = raw.split(separator: ":").compactMap { Int($0) }
+        guard parts.count == 2 else { return false }
+        onProjectDrop?(parts[0], parts[1], updateInsertionLine(sender))
+        return true
     }
 }
 
@@ -708,9 +781,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let project = item.element
             let handle = ProjectDragHandle()
             handle.toolTip = "拖动项目调整排序"
-            handle.onReorder = { [weak self] offset in
-                self?.moveProjectByOffset(groupIndex: groupIndex, projectIndex: projectIndex, subgroup: subgroup, offset: offset)
-            }
+            handle.payload = "\(groupIndex):\(projectIndex)"
             handle.widthAnchor.constraint(equalToConstant: 22).isActive = true
             let name = editableCell(project.name, placeholder: "项目名称", width: 120) { [weak self] value in
                 guard !value.isEmpty else { return }
@@ -751,7 +822,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             archive.toolTip = "归档项目"
             archive.contentTintColor = .tertiaryLabelColor
             archive.widthAnchor.constraint(equalToConstant: 36).isActive = true
-            let row = NSStackView(views: [handle, name, status, progress, followed, archive])
+            let row = ProjectDropRow(views: [handle, name, status, progress, followed, archive])
             row.orientation = .horizontal
             row.alignment = .centerY
             row.spacing = 8
@@ -759,6 +830,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             row.widthAnchor.constraint(equalToConstant: 730).isActive = true
             row.wantsLayer = true
             row.layer?.backgroundColor = (rowNumber % 2 == 0 ? NSColor.white : tint.withAlphaComponent(0.035)).cgColor
+            handle.previewView = row
+            row.onProjectDrop = { [weak self] sourceGroup, sourceProject, insertAfter in
+                self?.moveProject(sourceGroup: sourceGroup, sourceProject: sourceProject, targetGroup: groupIndex, targetProject: projectIndex, targetSubgroup: subgroup, insertAfter: insertAfter)
+            }
             section.addArrangedSubview(row)
         }
     }
@@ -888,23 +963,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showDashboard()
     }
 
-    private func moveProjectByOffset(groupIndex: Int, projectIndex: Int, subgroup: String?, offset: Int) {
-        guard store.groups.indices.contains(groupIndex), store.groups[groupIndex].projects.indices.contains(projectIndex) else { return }
-        let peerIndices = store.groups[groupIndex].projects.indices.filter { index in
-            let project = store.groups[groupIndex].projects[index]
-            return !(project.isArchived ?? false) && stageTitle(project.status) != "完成" && (project.subgroup ?? "") == (subgroup ?? "")
-        }
-        guard let currentPeerIndex = peerIndices.firstIndex(of: projectIndex) else { return }
-        let targetPeerIndex = max(0, min(currentPeerIndex + offset, peerIndices.count - 1))
-        guard currentPeerIndex != targetPeerIndex else { return }
-        let targetProjectIndex = peerIndices[targetPeerIndex]
-        var projects = store.groups[groupIndex].projects
-        let moved = projects.remove(at: projectIndex)
-        var insertionIndex = targetProjectIndex
-        if projectIndex < targetProjectIndex { insertionIndex -= 1 }
-        if targetPeerIndex > currentPeerIndex { insertionIndex += 1 }
+    private func moveProject(sourceGroup: Int, sourceProject: Int, targetGroup: Int, targetProject: Int, targetSubgroup: String?, insertAfter: Bool) {
+        guard sourceGroup == targetGroup,
+              store.groups.indices.contains(sourceGroup),
+              store.groups[sourceGroup].projects.indices.contains(sourceProject),
+              store.groups[targetGroup].projects.indices.contains(targetProject) else { return }
+        var projects = store.groups[sourceGroup].projects
+        var moved = projects.remove(at: sourceProject)
+        moved.subgroup = targetSubgroup
+        var insertionIndex = targetProject + (insertAfter ? 1 : 0)
+        if sourceProject < insertionIndex { insertionIndex -= 1 }
         projects.insert(moved, at: max(0, min(insertionIndex, projects.count)))
-        store.groups[groupIndex].projects = projects
+        store.groups[sourceGroup].projects = projects
         saveStore()
         showDashboard()
     }
