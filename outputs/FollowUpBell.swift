@@ -647,6 +647,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 groupName.font = .systemFont(ofSize: 15, weight: .bold)
                 groupName.textColor = tint
                 groupName.focusRingType = .none
+                groupName.setContentCompressionResistancePriority(.required, for: .horizontal)
+                groupName.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+                groupName.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+                groupName.widthAnchor.constraint(lessThanOrEqualToConstant: 280).isActive = true
                 groupName.onCommit = { [weak self] value in
                     guard !value.isEmpty else { return }
                     self?.store.groups[groupIndex].name = value
@@ -667,7 +671,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 removeGroup.isBordered = false
                 removeGroup.toolTip = "删除分组"
                 removeGroup.contentTintColor = .tertiaryLabelColor
-                let groupHeader = NSStackView(views: [groupName, countPill, NSView(), addSubgroup, add, removeGroup])
+                let headerSpacer = NSView()
+                headerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+                headerSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                let groupHeader = NSStackView(views: [groupName, countPill, headerSpacer, addSubgroup, add, removeGroup])
                 groupHeader.orientation = .horizontal
                 groupHeader.alignment = .centerY
                 groupHeader.spacing = 8
