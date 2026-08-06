@@ -377,8 +377,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var countdownTimer: Timer?
     private var compactView: CompactCountdownView?
     private var isCompact = false
-    private var pendingFocusProjectID: String?
     private var pendingFocusSubgroup: (groupID: String, name: String)?
+    private weak var dashboardScrollView: NSScrollView?
+    private var dashboardScrollY: CGFloat = 0
     private let reminders = [(11, 0), (15, 0), (20, 0)]
     private let encoder: JSONEncoder = {
         let value = JSONEncoder()
@@ -598,6 +599,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showDashboard(message: String? = nil) {
+        if let existingScroll = dashboardScrollView {
+            dashboardScrollY = existingScroll.contentView.bounds.origin.y
+        }
         resetRoot()
         let title = label("📣  项目跟进台", size: 27, weight: .bold, color: NSColor(calibratedRed: 0.12, green: 0.16, blue: 0.29, alpha: 1))
         let visibleGroups = store.groups
@@ -723,6 +727,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scroll.hasHorizontalScroller = false
         scroll.drawsBackground = false
         scroll.documentView = document
+        dashboardScrollView = scroll
         document.translatesAutoresizingMaskIntoConstraints = false
         document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor, constant: -8).isActive = true
 
@@ -745,6 +750,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             topButtons.widthAnchor.constraint(equalTo: stack.widthAnchor),
             scroll.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
+        root.layoutSubtreeIfNeeded()
+        let maximumY = max(0, document.fittingSize.height - scroll.contentSize.height)
+        let restoredY = min(max(0, dashboardScrollY), maximumY)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: restoredY))
+        scroll.reflectScrolledClipView(scroll.contentView)
     }
 
     private func groupColor(_ index: Int) -> NSColor {
@@ -815,14 +825,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard !value.isEmpty else { return }
                 self?.store.groups[groupIndex].projects[projectIndex].name = value
                 self?.saveStore()
-            }
-            if pendingFocusProjectID == project.id {
-                pendingFocusProjectID = nil
-                DispatchQueue.main.async { [weak self, weak name] in
-                    guard let name else { return }
-                    self?.window.makeFirstResponder(name)
-                    name.selectText(nil)
-                }
             }
             let status = NSPopUpButton(frame: .zero, pullsDown: false)
             status.addItems(withTitles: ["方案中", "设计中", "dpm中", "de中", "开发中", "测试中", "实验中", "完成"])
@@ -953,9 +955,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func insertProject(groupIndex: Int, subgroup: String?) {
         guard store.groups.indices.contains(groupIndex) else { return }
-        let id = UUID().uuidString
-        store.groups[groupIndex].projects.append(Project(id: id, name: "未命名项目", progress: "", owner: nil, lastFollowedAt: nil, isArchived: false, status: "方案中", subgroup: subgroup))
-        pendingFocusProjectID = id
+        let project = Project(id: UUID().uuidString, name: "未命名项目", progress: "", owner: nil, lastFollowedAt: nil, isArchived: false, status: "方案中", subgroup: subgroup)
+        if let subgroup {
+            let insertionIndex = store.groups[groupIndex].projects.firstIndex { $0.subgroup == subgroup } ?? store.groups[groupIndex].projects.endIndex
+            store.groups[groupIndex].projects.insert(project, at: insertionIndex)
+        } else {
+            store.groups[groupIndex].projects.insert(project, at: 0)
+        }
         saveStore()
         showDashboard()
     }
