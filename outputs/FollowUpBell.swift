@@ -26,9 +26,27 @@ struct ProjectStore: Codable {
 
 final class EditableCell: NSTextField {
     var onCommit: ((String) -> Void)?
+    private var isCommitting = false
+
+    func enableReturnCommit() {
+        target = self
+        action = #selector(commitOnReturn)
+    }
+
+    @objc private func commitOnReturn() {
+        commitValue()
+        window?.makeFirstResponder(nil)
+    }
+
+    private func commitValue() {
+        guard !isCommitting else { return }
+        isCommitting = true
+        onCommit?(stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+        isCommitting = false
+    }
 
     override func resignFirstResponder() -> Bool {
-        onCommit?(stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+        commitValue()
         return super.resignFirstResponder()
     }
 }
@@ -630,6 +648,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.store.groups[groupIndex].name = value
                     self?.saveStore()
                 }
+                groupName.enableReturnCommit()
                 let countPill = label("\(active.count) 项", size: 11, weight: .semibold, color: tint)
                 let addSubgroup = ClosureButton(title: "＋ 小分组") { [weak self] in self?.addSubgroup(groupIndex: groupIndex) }
                 addSubgroup.contentTintColor = tint
@@ -672,6 +691,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     smallName.onCommit = { [weak self] value in
                         self?.renameSubgroup(groupIndex: groupIndex, oldName: subgroup, newName: value)
                     }
+                    smallName.enableReturnCommit()
                     if pendingFocusSubgroup?.groupID == group.id && pendingFocusSubgroup?.name == subgroup {
                         pendingFocusSubgroup = nil
                         DispatchQueue.main.async { [weak self, weak smallName] in
@@ -761,6 +781,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         field.font = .systemFont(ofSize: 13)
         field.lineBreakMode = .byTruncatingTail
         field.onCommit = commit
+        field.enableReturnCommit()
         field.widthAnchor.constraint(equalToConstant: width).isActive = true
         return field
     }
