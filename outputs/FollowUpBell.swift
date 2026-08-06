@@ -76,6 +76,74 @@ final class ClosureButton: NSButton {
     @objc private func runHandler() { handler?() }
 }
 
+private let projectDragType = NSPasteboard.PasteboardType("local.followupbell.project")
+
+final class ProjectDragHandle: NSView, NSDraggingSource {
+    var payload = ""
+    private var dragging = false
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 22, height: 28) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let text = "⠿" as NSString
+        text.draw(at: NSPoint(x: 3, y: 5), withAttributes: [
+            .font: NSFont.systemFont(ofSize: 16, weight: .medium),
+            .foregroundColor: NSColor.tertiaryLabelColor
+        ])
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !dragging, !payload.isEmpty else { return }
+        dragging = true
+        let pasteboardItem = NSPasteboardItem()
+        pasteboardItem.setString(payload, forType: projectDragType)
+        let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
+        draggingItem.setDraggingFrame(bounds, contents: snapshotImage())
+        beginDraggingSession(with: [draggingItem], event: event, source: self)
+    }
+
+    private func snapshotImage() -> NSImage {
+        let image = NSImage(size: bounds.size)
+        image.lockFocus()
+        draw(bounds)
+        image.unlockFocus()
+        return image
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .move }
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool { true }
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) { dragging = false }
+}
+
+final class ProjectDropRow: NSStackView {
+    var onProjectDrop: ((Int, Int, Bool) -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes([projectDragType])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        layer?.borderWidth = 2
+        layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.7).cgColor
+        return .move
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) { layer?.borderWidth = 0 }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        defer { layer?.borderWidth = 0 }
+        guard let raw = sender.draggingPasteboard.string(forType: projectDragType) else { return false }
+        let parts = raw.split(separator: ":").compactMap { Int($0) }
+        guard parts.count == 2 else { return false }
+        let localPoint = convert(sender.draggingLocation, from: nil)
+        onProjectDrop?(parts[0], parts[1], localPoint.y > bounds.midY)
+        return true
+    }
+}
+
 struct CountdownTimes {
     var start: Int
     var end: Int
@@ -249,6 +317,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var countdownTimer: Timer?
     private var compactView: CompactCountdownView?
     private var isCompact = false
+    private var pendingFocusProjectID: String?
+    private var pendingFocusSubgroup: (groupID: String, name: String)?
     private let reminders = [(11, 0), (15, 0), (20, 0)]
     private let encoder: JSONEncoder = {
         let value = JSONEncoder()
@@ -491,7 +561,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             for (groupIndex, group) in store.groups.enumerated() {
                 let active = group.projects.enumerated().filter { !($0.element.isArchived ?? false) && stageTitle($0.element.status) != "完成" }
-                if active.isEmpty { continue }
                 let tint = groupColor(groupIndex)
                 let section = NSStackView()
                 section.orientation = .vertical
@@ -541,8 +610,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     smallHeader.alignment = .centerY
                     smallHeader.edgeInsets = NSEdgeInsets(top: 8, left: 20, bottom: 6, right: 12)
                     let dot = label("◆", size: 9, color: tint)
-                    let smallName = label(subgroup, size: 12, weight: .semibold, color: tint)
-                    let addInside = ClosureButton(title: "＋ 项目") { [weak self] in self?.promptAddProject(groupIndex: groupIndex, subgroup: subgroup) }
+                    let smallName = EditableCell(string: subgroup)
+                    smallName.isBezeled = false
+                    smallName.drawsBackground = false
+                    smallName.font = .systemFont(ofSize: 12, weight: .semibold)
+                    smallName.textColor = tint
+                    smallName.focusRingType = .none
+                    smallName.widthAnchor.constraint(equalToConstant: 220).isActive = true
+                    smallName.onCommit = { [weak self] value in
+                        self?.renameSubgroup(groupIndex: groupIndex, oldName: subgroup, newName: value)
+                    }
+                    if pendingFocusSubgroup?.groupID == group.id && pendingFocusSubgroup?.name == subgroup {
+                        pendingFocusSubgroup = nil
+                        DispatchQueue.main.async { [weak self, weak smallName] in
+                            guard let smallName else { return }
+                            self?.window.makeFirstResponder(smallName)
+                            smallName.selectText(nil)
+                        }
+                    }
+                    let addInside = ClosureButton(title: "＋ 项目") { [weak self] in self?.insertProject(groupIndex: groupIndex, subgroup: subgroup) }
                     addInside.contentTintColor = tint
                     addInside.font = .systemFont(ofSize: 11, weight: .semibold)
                     smallHeader.addArrangedSubview(dot)
@@ -643,14 +729,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func appendProjectTable(to section: NSStackView, items: [(offset: Int, element: Project)], groupIndex: Int, tint: NSColor, subgroup: String?) {
         guard !items.isEmpty else { return }
-        section.addArrangedSubview(tableRow(["项目", "状态", "当前进度 / 下一步", "上次跟进", ""], widths: [150, 100, 240, 140, 40], header: true))
+        section.addArrangedSubview(tableRow(["", "项目", "状态", "当前进度 / 下一步", "上次跟进", ""], widths: [22, 120, 100, 240, 140, 36], header: true))
         for (rowNumber, item) in items.enumerated() {
             let projectIndex = item.offset
             let project = item.element
-            let name = editableCell(project.name, placeholder: "项目名称", width: 150) { [weak self] value in
+            let handle = ProjectDragHandle()
+            handle.payload = "\(groupIndex):\(projectIndex)"
+            handle.toolTip = "拖动项目调整排序"
+            handle.widthAnchor.constraint(equalToConstant: 22).isActive = true
+            let name = editableCell(project.name, placeholder: "项目名称", width: 120) { [weak self] value in
                 guard !value.isEmpty else { return }
                 self?.store.groups[groupIndex].projects[projectIndex].name = value
                 self?.saveStore()
+            }
+            if pendingFocusProjectID == project.id {
+                pendingFocusProjectID = nil
+                DispatchQueue.main.async { [weak self, weak name] in
+                    guard let name else { return }
+                    self?.window.makeFirstResponder(name)
+                    name.selectText(nil)
+                }
             }
             let status = NSPopUpButton(frame: .zero, pullsDown: false)
             status.addItems(withTitles: ["方案中", "设计中", "dpm中", "de中", "开发中", "测试中", "实验中", "完成"])
@@ -677,8 +775,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             archive.isBordered = false
             archive.toolTip = "归档项目"
             archive.contentTintColor = .tertiaryLabelColor
-            archive.widthAnchor.constraint(equalToConstant: 40).isActive = true
-            let row = NSStackView(views: [name, status, progress, followed, archive])
+            archive.widthAnchor.constraint(equalToConstant: 36).isActive = true
+            let row = ProjectDropRow(views: [handle, name, status, progress, followed, archive])
             row.orientation = .horizontal
             row.alignment = .centerY
             row.spacing = 8
@@ -686,6 +784,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             row.widthAnchor.constraint(equalToConstant: 730).isActive = true
             row.wantsLayer = true
             row.layer?.backgroundColor = (rowNumber % 2 == 0 ? NSColor.white : tint.withAlphaComponent(0.035)).cgColor
+            row.onProjectDrop = { [weak self] sourceGroup, sourceProject, insertAfter in
+                self?.moveProject(sourceGroup: sourceGroup, sourceProject: sourceProject, targetGroup: groupIndex, targetProject: projectIndex, targetSubgroup: subgroup, insertAfter: insertAfter)
+            }
             section.addArrangedSubview(row)
         }
     }
@@ -772,49 +873,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func addProject(_ sender: NSButton) {
-        let groupIndex = sender.tag
-        promptAddProject(groupIndex: groupIndex, subgroup: nil)
+        insertProject(groupIndex: sender.tag, subgroup: nil)
     }
 
-    private func promptAddProject(groupIndex: Int, subgroup: String?) {
+    private func insertProject(groupIndex: Int, subgroup: String?) {
         guard store.groups.indices.contains(groupIndex) else { return }
-        let alert = NSAlert()
-        alert.messageText = "添加项目"
-        alert.informativeText = subgroup.map { "添加到“\(store.groups[groupIndex].name) / \($0)”" } ?? "添加到“\(store.groups[groupIndex].name)”"
-        alert.addButton(withTitle: "添加")
-        alert.addButton(withTitle: "取消")
-        let input = NSTextField(string: "")
-        input.placeholderString = "项目名称"
-        input.frame = NSRect(x: 0, y: 0, width: 300, height: 26)
-        alert.accessoryView = input
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let name = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
-        store.groups[groupIndex].projects.append(Project(id: UUID().uuidString, name: name, progress: "", owner: nil, lastFollowedAt: nil, isArchived: false, status: "方案中", subgroup: subgroup))
+        let id = UUID().uuidString
+        store.groups[groupIndex].projects.append(Project(id: id, name: "未命名项目", progress: "", owner: nil, lastFollowedAt: nil, isArchived: false, status: "方案中", subgroup: subgroup))
+        pendingFocusProjectID = id
         saveStore()
-        showDashboard(message: "项目已添加")
+        showDashboard()
     }
 
     private func addSubgroup(groupIndex: Int) {
         guard store.groups.indices.contains(groupIndex) else { return }
-        let alert = NSAlert()
-        alert.messageText = "新建小分组"
-        alert.informativeText = "位于“\(store.groups[groupIndex].name)”内"
-        alert.addButton(withTitle: "创建")
-        alert.addButton(withTitle: "取消")
-        let input = NSTextField(string: "")
-        input.placeholderString = "小分组名称"
-        input.frame = NSRect(x: 0, y: 0, width: 300, height: 26)
-        alert.accessoryView = input
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let name = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
         var subgroups = store.groups[groupIndex].subgroups ?? []
-        guard !subgroups.contains(name) else { return }
+        var suffix = 1
+        var name = "未命名小分组"
+        while subgroups.contains(name) {
+            suffix += 1
+            name = "未命名小分组 \(suffix)"
+        }
         subgroups.append(name)
         store.groups[groupIndex].subgroups = subgroups
+        pendingFocusSubgroup = (store.groups[groupIndex].id, name)
         saveStore()
-        showDashboard(message: "小分组已创建")
+        showDashboard()
+    }
+
+    private func renameSubgroup(groupIndex: Int, oldName: String, newName rawValue: String) {
+        guard store.groups.indices.contains(groupIndex) else { return }
+        let newName = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newName.isEmpty, newName != oldName else { return }
+        var subgroups = store.groups[groupIndex].subgroups ?? []
+        guard !subgroups.contains(newName), let index = subgroups.firstIndex(of: oldName) else { return }
+        subgroups[index] = newName
+        store.groups[groupIndex].subgroups = subgroups
+        for projectIndex in store.groups[groupIndex].projects.indices where store.groups[groupIndex].projects[projectIndex].subgroup == oldName {
+            store.groups[groupIndex].projects[projectIndex].subgroup = newName
+        }
+        saveStore()
+        showDashboard()
+    }
+
+    private func moveProject(sourceGroup: Int, sourceProject: Int, targetGroup: Int, targetProject: Int, targetSubgroup: String?, insertAfter: Bool) {
+        guard sourceGroup == targetGroup,
+              store.groups.indices.contains(sourceGroup),
+              store.groups[sourceGroup].projects.indices.contains(sourceProject),
+              store.groups[targetGroup].projects.indices.contains(targetProject) else { return }
+        var projects = store.groups[sourceGroup].projects
+        var moved = projects.remove(at: sourceProject)
+        moved.subgroup = targetSubgroup
+        var insertionIndex = targetProject + (insertAfter ? 1 : 0)
+        if sourceProject < insertionIndex { insertionIndex -= 1 }
+        projects.insert(moved, at: max(0, min(insertionIndex, projects.count)))
+        store.groups[sourceGroup].projects = projects
+        saveStore()
+        showDashboard()
     }
 
     @objc private func changeStatus(_ sender: NSPopUpButton) {
