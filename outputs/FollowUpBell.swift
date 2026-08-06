@@ -16,6 +16,7 @@ struct ProjectGroup: Codable {
     var name: String
     var projects: [Project]
     var subgroups: [String]? = nil
+    var isArchived: Bool? = nil
 }
 
 struct ProjectStore: Codable {
@@ -76,13 +77,12 @@ final class ClosureButton: NSButton {
     @objc private func runHandler() { handler?() }
 }
 
-private let projectDragType = NSPasteboard.PasteboardType("local.followupbell.project")
-
-final class ProjectDragHandle: NSView, NSDraggingSource {
-    var payload = ""
-    private var dragging = false
+final class ProjectDragHandle: NSView {
+    var onReorder: ((Int) -> Void)?
+    private var isTrackingDrag = false
 
     override var intrinsicContentSize: NSSize { NSSize(width: 22, height: 28) }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
         let text = "⠿" as NSString
@@ -92,55 +92,18 @@ final class ProjectDragHandle: NSView, NSDraggingSource {
         ])
     }
 
-    override func mouseDragged(with event: NSEvent) {
-        guard !dragging, !payload.isEmpty else { return }
-        dragging = true
-        let pasteboardItem = NSPasteboardItem()
-        pasteboardItem.setString(payload, forType: projectDragType)
-        let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
-        draggingItem.setDraggingFrame(bounds, contents: snapshotImage())
-        beginDraggingSession(with: [draggingItem], event: event, source: self)
-    }
-
-    private func snapshotImage() -> NSImage {
-        let image = NSImage(size: bounds.size)
-        image.lockFocus()
-        draw(bounds)
-        image.unlockFocus()
-        return image
-    }
-
-    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .move }
-    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool { true }
-    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) { dragging = false }
-}
-
-final class ProjectDropRow: NSStackView {
-    var onProjectDrop: ((Int, Int, Bool) -> Void)?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        registerForDraggedTypes([projectDragType])
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        layer?.borderWidth = 2
-        layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.7).cgColor
-        return .move
-    }
-
-    override func draggingExited(_ sender: NSDraggingInfo?) { layer?.borderWidth = 0 }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        defer { layer?.borderWidth = 0 }
-        guard let raw = sender.draggingPasteboard.string(forType: projectDragType) else { return false }
-        let parts = raw.split(separator: ":").compactMap { Int($0) }
-        guard parts.count == 2 else { return false }
-        let localPoint = convert(sender.draggingLocation, from: nil)
-        onProjectDrop?(parts[0], parts[1], localPoint.y > bounds.midY)
-        return true
+    override func mouseDown(with event: NSEvent) {
+        guard !isTrackingDrag, let window else { return }
+        isTrackingDrag = true
+        let startY = event.locationInWindow.y
+        var lastY = startY
+        while let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture, inMode: .eventTracking, dequeue: true) {
+            lastY = next.locationInWindow.y
+            if next.type == .leftMouseUp { break }
+        }
+        isTrackingDrag = false
+        let rowOffset = Int(round((startY - lastY) / 46.0))
+        if rowOffset != 0 { onReorder?(rowOffset) }
     }
 }
 
@@ -536,8 +499,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showDashboard(message: String? = nil) {
         resetRoot()
         let title = label("📣  项目跟进台", size: 27, weight: .bold, color: NSColor(calibratedRed: 0.12, green: 0.16, blue: 0.29, alpha: 1))
-        let count = store.groups.flatMap(\.projects).filter { !($0.isArchived ?? false) && stageTitle($0.status) != "完成" }.count
-        let subtitle = label("\(store.groups.count) 个分组 · \(count) 个进行中项目  ·  点击任意单元格直接修改", size: 13, weight: .medium, color: NSColor(calibratedRed: 0.35, green: 0.38, blue: 0.52, alpha: 1))
+        let visibleGroups = store.groups.filter { !($0.isArchived ?? false) }
+        let count = visibleGroups.flatMap(\.projects).filter { !($0.isArchived ?? false) && stageTitle($0.status) != "完成" }.count
+        let subtitle = label("\(visibleGroups.count) 个分组 · \(count) 个进行中项目  ·  点击任意单元格直接修改", size: 13, weight: .medium, color: NSColor(calibratedRed: 0.35, green: 0.38, blue: 0.52, alpha: 1))
 
         let spacer = NSView()
         let addGroupButton = compactButton("＋ 分组", action: #selector(addGroup))
@@ -560,6 +524,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             document.addArrangedSubview(button("载入示例项目", action: #selector(loadSamples), primary: true))
         } else {
             for (groupIndex, group) in store.groups.enumerated() {
+                if group.isArchived ?? false { continue }
                 let active = group.projects.enumerated().filter { !($0.element.isArchived ?? false) && stageTitle($0.element.status) != "完成" }
                 let tint = groupColor(groupIndex)
                 let section = NSStackView()
@@ -592,7 +557,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 add.isBordered = false
                 add.contentTintColor = tint
                 add.font = .systemFont(ofSize: 12, weight: .semibold)
-                let groupHeader = NSStackView(views: [groupName, countPill, NSView(), addSubgroup, add])
+                let removeGroup = NSButton(title: "×", target: self, action: #selector(archiveGroup(_:)))
+                removeGroup.tag = groupIndex
+                removeGroup.isBordered = false
+                removeGroup.toolTip = "移除分组（可恢复）"
+                removeGroup.contentTintColor = .tertiaryLabelColor
+                let groupHeader = NSStackView(views: [groupName, countPill, NSView(), addSubgroup, add, removeGroup])
                 groupHeader.orientation = .horizontal
                 groupHeader.alignment = .centerY
                 groupHeader.spacing = 8
@@ -644,10 +614,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             let completed = completedProjects()
             if !completed.isEmpty { document.addArrangedSubview(completedSection(completed)) }
+            let removed = store.groups.enumerated().filter { $0.element.isArchived ?? false }
+            if !removed.isEmpty { document.addArrangedSubview(archivedGroupsSection(removed)) }
         }
 
         let scroll = NSScrollView()
-        scroll.hasVerticalScroller = true
+        scroll.hasVerticalScroller = false
+        scroll.hasHorizontalScroller = false
         scroll.drawsBackground = false
         scroll.documentView = document
         document.translatesAutoresizingMaskIntoConstraints = false
@@ -734,8 +707,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let projectIndex = item.offset
             let project = item.element
             let handle = ProjectDragHandle()
-            handle.payload = "\(groupIndex):\(projectIndex)"
             handle.toolTip = "拖动项目调整排序"
+            handle.onReorder = { [weak self] offset in
+                self?.moveProjectByOffset(groupIndex: groupIndex, projectIndex: projectIndex, subgroup: subgroup, offset: offset)
+            }
             handle.widthAnchor.constraint(equalToConstant: 22).isActive = true
             let name = editableCell(project.name, placeholder: "项目名称", width: 120) { [weak self] value in
                 guard !value.isEmpty else { return }
@@ -776,7 +751,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             archive.toolTip = "归档项目"
             archive.contentTintColor = .tertiaryLabelColor
             archive.widthAnchor.constraint(equalToConstant: 36).isActive = true
-            let row = ProjectDropRow(views: [handle, name, status, progress, followed, archive])
+            let row = NSStackView(views: [handle, name, status, progress, followed, archive])
             row.orientation = .horizontal
             row.alignment = .centerY
             row.spacing = 8
@@ -784,9 +759,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             row.widthAnchor.constraint(equalToConstant: 730).isActive = true
             row.wantsLayer = true
             row.layer?.backgroundColor = (rowNumber % 2 == 0 ? NSColor.white : tint.withAlphaComponent(0.035)).cgColor
-            row.onProjectDrop = { [weak self] sourceGroup, sourceProject, insertAfter in
-                self?.moveProject(sourceGroup: sourceGroup, sourceProject: sourceProject, targetGroup: groupIndex, targetProject: projectIndex, targetSubgroup: subgroup, insertAfter: insertAfter)
-            }
             section.addArrangedSubview(row)
         }
     }
@@ -794,6 +766,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func completedProjects() -> [(Int, Int, Project, String)] {
         var result: [(Int, Int, Project, String)] = []
         for (groupIndex, group) in store.groups.enumerated() {
+            if group.isArchived ?? false { continue }
             for (projectIndex, project) in group.projects.enumerated() where !(project.isArchived ?? false) && stageTitle(project.status) == "完成" {
                 result.append((groupIndex, projectIndex, project, group.name))
             }
@@ -839,6 +812,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             row.alignment = .centerY
             row.spacing = 8
             row.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 10)
+            row.widthAnchor.constraint(equalToConstant: 730).isActive = true
+            section.addArrangedSubview(row)
+        }
+        return section
+    }
+
+    private func archivedGroupsSection(_ items: [(offset: Int, element: ProjectGroup)]) -> NSView {
+        let section = NSStackView()
+        section.orientation = .vertical
+        section.alignment = .leading
+        section.spacing = 0
+        section.wantsLayer = true
+        section.layer?.backgroundColor = NSColor.secondaryLabelColor.withAlphaComponent(0.06).cgColor
+        section.layer?.cornerRadius = 13
+        let header = label("已移除分组  ·  \(items.count) 个", size: 13, weight: .semibold, color: .secondaryLabelColor)
+        header.widthAnchor.constraint(equalToConstant: 730).isActive = true
+        section.addArrangedSubview(header)
+        for item in items {
+            let name = label(item.element.name, size: 12, weight: .medium, color: .secondaryLabelColor)
+            let count = label("\(item.element.projects.count) 个项目", size: 11, color: .tertiaryLabelColor)
+            let restore = NSButton(title: "恢复", target: self, action: #selector(restoreGroup(_:)))
+            restore.tag = item.offset
+            restore.isBordered = false
+            restore.contentTintColor = .systemBlue
+            let row = NSStackView(views: [name, count, NSView(), restore])
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 10
+            row.edgeInsets = NSEdgeInsets(top: 8, left: 14, bottom: 8, right: 12)
             row.widthAnchor.constraint(equalToConstant: 730).isActive = true
             section.addArrangedSubview(row)
         }
@@ -916,18 +918,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showDashboard()
     }
 
-    private func moveProject(sourceGroup: Int, sourceProject: Int, targetGroup: Int, targetProject: Int, targetSubgroup: String?, insertAfter: Bool) {
-        guard sourceGroup == targetGroup,
-              store.groups.indices.contains(sourceGroup),
-              store.groups[sourceGroup].projects.indices.contains(sourceProject),
-              store.groups[targetGroup].projects.indices.contains(targetProject) else { return }
-        var projects = store.groups[sourceGroup].projects
-        var moved = projects.remove(at: sourceProject)
-        moved.subgroup = targetSubgroup
-        var insertionIndex = targetProject + (insertAfter ? 1 : 0)
-        if sourceProject < insertionIndex { insertionIndex -= 1 }
+    private func moveProjectByOffset(groupIndex: Int, projectIndex: Int, subgroup: String?, offset: Int) {
+        guard store.groups.indices.contains(groupIndex), store.groups[groupIndex].projects.indices.contains(projectIndex) else { return }
+        let peerIndices = store.groups[groupIndex].projects.indices.filter { index in
+            let project = store.groups[groupIndex].projects[index]
+            return !(project.isArchived ?? false) && stageTitle(project.status) != "完成" && (project.subgroup ?? "") == (subgroup ?? "")
+        }
+        guard let currentPeerIndex = peerIndices.firstIndex(of: projectIndex) else { return }
+        let targetPeerIndex = max(0, min(currentPeerIndex + offset, peerIndices.count - 1))
+        guard currentPeerIndex != targetPeerIndex else { return }
+        let targetProjectIndex = peerIndices[targetPeerIndex]
+        var projects = store.groups[groupIndex].projects
+        let moved = projects.remove(at: projectIndex)
+        var insertionIndex = targetProjectIndex
+        if projectIndex < targetProjectIndex { insertionIndex -= 1 }
+        if targetPeerIndex > currentPeerIndex { insertionIndex += 1 }
         projects.insert(moved, at: max(0, min(insertionIndex, projects.count)))
-        store.groups[sourceGroup].projects = projects
+        store.groups[groupIndex].projects = projects
+        saveStore()
+        showDashboard()
+    }
+
+    @objc private func archiveGroup(_ sender: NSButton) {
+        let groupIndex = sender.tag
+        guard store.groups.indices.contains(groupIndex) else { return }
+        let alert = NSAlert()
+        alert.messageText = "移除“\(store.groups[groupIndex].name)”？"
+        alert.informativeText = "分组和其中的项目会收进“已移除分组”，之后可以恢复。"
+        alert.addButton(withTitle: "移除")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        store.groups[groupIndex].isArchived = true
+        saveStore()
+        showDashboard()
+    }
+
+    @objc private func restoreGroup(_ sender: NSButton) {
+        guard store.groups.indices.contains(sender.tag) else { return }
+        store.groups[sender.tag].isArchived = false
         saveStore()
         showDashboard()
     }
@@ -1024,6 +1052,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if isCompact { switchToExpanded() }
         reminderQueue = []
         for (groupIndex, group) in store.groups.enumerated() {
+            if group.isArchived ?? false { continue }
             for (projectIndex, project) in group.projects.enumerated() where !(project.isArchived ?? false) && stageTitle(project.status) != "完成" {
                 reminderQueue.append((groupIndex, projectIndex))
             }
