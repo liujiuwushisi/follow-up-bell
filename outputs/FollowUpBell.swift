@@ -37,6 +37,11 @@ final class FlippedStackView: NSStackView {
     override var isFlipped: Bool { true }
 }
 
+final class FollowUpWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 final class AuroraBackgroundView: NSView {
     override var isFlipped: Bool { true }
 
@@ -406,12 +411,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupWindow() {
         // 这是一个长期摆在桌面上的任务板，不提供容易误触的关闭与最小化按钮。
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 620), styleMask: [.titled, .fullSizeContentView, .resizable], backing: .buffered, defer: false)
+        window = FollowUpWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 620), styleMask: [.titled, .fullSizeContentView, .resizable], backing: .buffered, defer: false)
         window.minSize = NSSize(width: 700, height: 500)
         window.title = "任务跟进"
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = false
-        applyBottomLayer()
+        applyNormalLayer()
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
@@ -425,13 +430,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openWindow() {
-        window.orderBack(nil)
+        applyNormalLayer()
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 
-    private func applyBottomLayer() {
-        let desktopLevel = Int(CGWindowLevelForKey(.desktopIconWindow)) + 1
-        window.level = NSWindow.Level(rawValue: desktopLevel)
-        window.orderBack(nil)
+    private func applyNormalLayer() {
+        window.level = .normal
     }
 
     private func installExpandedMenu() {
@@ -457,7 +462,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.hasShadow = false
         window.contentView = view
         window.setFrame(NSRect(x: oldFrame.maxX - size.width, y: oldFrame.maxY - size.height, width: size.width, height: size.height), display: true, animate: true)
-        applyBottomLayer()
+        applyNormalLayer()
+        window.makeKeyAndOrderFront(nil)
     }
 
     @objc private func switchToExpanded() {
@@ -475,7 +481,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showDashboard()
         installExpandedMenu()
         window.setFrame(NSRect(x: oldFrame.maxX - 820, y: oldFrame.maxY - 620, width: 820, height: 620), display: true, animate: true)
-        applyBottomLayer()
+        applyNormalLayer()
+        window.makeKeyAndOrderFront(nil)
     }
 
     fileprivate func showCompactMenu(_ event: NSEvent, view: NSView) {
