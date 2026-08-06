@@ -82,6 +82,7 @@ final class ProjectDragHandle: NSView {
     private var isTrackingDrag = false
 
     override var intrinsicContentSize: NSSize { NSSize(width: 22, height: 28) }
+    override var mouseDownCanMoveWindow: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -336,7 +337,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.minSize = NSSize(width: 700, height: 500)
         window.title = "任务跟进"
         window.titlebarAppearsTransparent = true
-        window.isMovableByWindowBackground = true
+        window.isMovableByWindowBackground = false
         applyBottomLayer()
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.hidesOnDeactivate = false
@@ -377,6 +378,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.owner = self
         compactView = view
         window.styleMask = [.borderless]
+        window.isMovableByWindowBackground = true
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
@@ -391,6 +393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let oldFrame = window.frame
         compactView = nil
         window.styleMask = [.titled, .fullSizeContentView, .resizable]
+        window.isMovableByWindowBackground = false
         window.titlebarAppearsTransparent = true
         window.isOpaque = true
         window.backgroundColor = NSColor(calibratedRed: 0.955, green: 0.965, blue: 0.99, alpha: 1)
@@ -499,7 +502,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showDashboard(message: String? = nil) {
         resetRoot()
         let title = label("📣  项目跟进台", size: 27, weight: .bold, color: NSColor(calibratedRed: 0.12, green: 0.16, blue: 0.29, alpha: 1))
-        let visibleGroups = store.groups.filter { !($0.isArchived ?? false) }
+        let visibleGroups = store.groups
         let count = visibleGroups.flatMap(\.projects).filter { !($0.isArchived ?? false) && stageTitle($0.status) != "完成" }.count
         let subtitle = label("\(visibleGroups.count) 个分组 · \(count) 个进行中项目  ·  点击任意单元格直接修改", size: 13, weight: .medium, color: NSColor(calibratedRed: 0.35, green: 0.38, blue: 0.52, alpha: 1))
 
@@ -524,7 +527,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             document.addArrangedSubview(button("载入示例项目", action: #selector(loadSamples), primary: true))
         } else {
             for (groupIndex, group) in store.groups.enumerated() {
-                if group.isArchived ?? false { continue }
                 let active = group.projects.enumerated().filter { !($0.element.isArchived ?? false) && stageTitle($0.element.status) != "完成" }
                 let tint = groupColor(groupIndex)
                 let section = NSStackView()
@@ -557,10 +559,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 add.isBordered = false
                 add.contentTintColor = tint
                 add.font = .systemFont(ofSize: 12, weight: .semibold)
-                let removeGroup = NSButton(title: "×", target: self, action: #selector(archiveGroup(_:)))
+                let removeGroup = NSButton(title: "×", target: self, action: #selector(deleteGroup(_:)))
                 removeGroup.tag = groupIndex
                 removeGroup.isBordered = false
-                removeGroup.toolTip = "移除分组（可恢复）"
+                removeGroup.toolTip = "删除分组"
                 removeGroup.contentTintColor = .tertiaryLabelColor
                 let groupHeader = NSStackView(views: [groupName, countPill, NSView(), addSubgroup, add, removeGroup])
                 groupHeader.orientation = .horizontal
@@ -614,8 +616,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             let completed = completedProjects()
             if !completed.isEmpty { document.addArrangedSubview(completedSection(completed)) }
-            let removed = store.groups.enumerated().filter { $0.element.isArchived ?? false }
-            if !removed.isEmpty { document.addArrangedSubview(archivedGroupsSection(removed)) }
         }
 
         let scroll = NSScrollView()
@@ -766,7 +766,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func completedProjects() -> [(Int, Int, Project, String)] {
         var result: [(Int, Int, Project, String)] = []
         for (groupIndex, group) in store.groups.enumerated() {
-            if group.isArchived ?? false { continue }
             for (projectIndex, project) in group.projects.enumerated() where !(project.isArchived ?? false) && stageTitle(project.status) == "完成" {
                 result.append((groupIndex, projectIndex, project, group.name))
             }
@@ -812,35 +811,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             row.alignment = .centerY
             row.spacing = 8
             row.edgeInsets = NSEdgeInsets(top: 9, left: 14, bottom: 9, right: 10)
-            row.widthAnchor.constraint(equalToConstant: 730).isActive = true
-            section.addArrangedSubview(row)
-        }
-        return section
-    }
-
-    private func archivedGroupsSection(_ items: [(offset: Int, element: ProjectGroup)]) -> NSView {
-        let section = NSStackView()
-        section.orientation = .vertical
-        section.alignment = .leading
-        section.spacing = 0
-        section.wantsLayer = true
-        section.layer?.backgroundColor = NSColor.secondaryLabelColor.withAlphaComponent(0.06).cgColor
-        section.layer?.cornerRadius = 13
-        let header = label("已移除分组  ·  \(items.count) 个", size: 13, weight: .semibold, color: .secondaryLabelColor)
-        header.widthAnchor.constraint(equalToConstant: 730).isActive = true
-        section.addArrangedSubview(header)
-        for item in items {
-            let name = label(item.element.name, size: 12, weight: .medium, color: .secondaryLabelColor)
-            let count = label("\(item.element.projects.count) 个项目", size: 11, color: .tertiaryLabelColor)
-            let restore = NSButton(title: "恢复", target: self, action: #selector(restoreGroup(_:)))
-            restore.tag = item.offset
-            restore.isBordered = false
-            restore.contentTintColor = .systemBlue
-            let row = NSStackView(views: [name, count, NSView(), restore])
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 10
-            row.edgeInsets = NSEdgeInsets(top: 8, left: 14, bottom: 8, right: 12)
             row.widthAnchor.constraint(equalToConstant: 730).isActive = true
             section.addArrangedSubview(row)
         }
@@ -939,23 +909,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showDashboard()
     }
 
-    @objc private func archiveGroup(_ sender: NSButton) {
+    @objc private func deleteGroup(_ sender: NSButton) {
         let groupIndex = sender.tag
         guard store.groups.indices.contains(groupIndex) else { return }
         let alert = NSAlert()
-        alert.messageText = "移除“\(store.groups[groupIndex].name)”？"
-        alert.informativeText = "分组和其中的项目会收进“已移除分组”，之后可以恢复。"
-        alert.addButton(withTitle: "移除")
+        alert.messageText = "永久删除“\(store.groups[groupIndex].name)”？"
+        alert.informativeText = "这个分组及其中的 \(store.groups[groupIndex].projects.count) 个项目会被直接删除，无法恢复。"
+        alert.addButton(withTitle: "永久删除")
         alert.addButton(withTitle: "取消")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        store.groups[groupIndex].isArchived = true
-        saveStore()
-        showDashboard()
-    }
-
-    @objc private func restoreGroup(_ sender: NSButton) {
-        guard store.groups.indices.contains(sender.tag) else { return }
-        store.groups[sender.tag].isArchived = false
+        store.groups.remove(at: groupIndex)
         saveStore()
         showDashboard()
     }
@@ -1052,7 +1015,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if isCompact { switchToExpanded() }
         reminderQueue = []
         for (groupIndex, group) in store.groups.enumerated() {
-            if group.isArchived ?? false { continue }
             for (projectIndex, project) in group.projects.enumerated() where !(project.isArchived ?? false) && stageTitle(project.status) != "完成" {
                 reminderQueue.append((groupIndex, projectIndex))
             }
